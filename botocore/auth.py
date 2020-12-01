@@ -29,7 +29,7 @@ import awscrt.auth
 import awscrt.http
 
 from botocore.exceptions import NoCredentialsError
-from botocore.utils import normalize_url_path, percent_encode_sequence
+from botocore.utils import CrtUtil, normalize_url_path, percent_encode_sequence
 from botocore.compat import HTTPHeaders
 from botocore.compat import quote, unquote, urlsplit, parse_qs
 from botocore.compat import urlunsplit
@@ -570,6 +570,7 @@ class S3SigV4QueryAuth(SigV4QueryAuth):
     http://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 
     """
+
     def _normalize_url_path(self, path):
         # For S3, we do not normalize the path.
         return path
@@ -589,6 +590,7 @@ class S3SigV4PostAuth(SigV4Auth):
     Implementation doc here:
     http://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-UsingHTTPPOST.html
     """
+
     def add_auth(self, request):
         datetime_now = datetime.datetime.utcnow()
         request.context['timestamp'] = datetime_now.strftime(SIGV4_TIMESTAMP)
@@ -692,40 +694,11 @@ class CrtSigV4Auth(BaseSigner):
             signed_body_value=explicit_payload,
             signed_body_header_type=body_header,
             expiration_in_seconds=self._expiration_in_seconds,
-            )
-        crt_request = self._crt_request_from_aws_request(request)
+        )
+        crt_request = CrtUtil.crt_request_from_aws_request(request)
         future = awscrt.auth.aws_sign_request(crt_request, signing_config)
         future.result()
         self._apply_signing_changes(request, crt_request)
-
-    def _crt_request_from_aws_request(self, aws_request):
-        url_parts = urlsplit(aws_request.url)
-        crt_path = url_parts.path if url_parts.path else '/'
-        if aws_request.params:
-            array = []
-            for (param, value) in aws_request.params.items():
-                value = str(value)
-                array.append('%s=%s' % (param, value))
-            crt_path = crt_path + '?' + '&'.join(array)
-        elif url_parts.query:
-            crt_path = '%s?%s' % (crt_path, url_parts.query)
-
-        crt_headers = awscrt.http.HttpHeaders(aws_request.headers.items())
-
-        # CRT requires body (if it exists) to be an I/O stream.
-        crt_body_stream = None
-        if aws_request.body:
-            if hasattr(aws_request.body, 'seek'):
-                crt_body_stream = aws_request.body
-            else:
-                crt_body_stream = BytesIO(aws_request.body)
-
-        crt_request = awscrt.http.HttpRequest(
-            method=aws_request.method,
-            path=crt_path,
-            headers=crt_headers,
-            body_stream=crt_body_stream)
-        return crt_request
 
     def _apply_signing_changes(self, aws_request, signed_crt_request):
         # Apply changes from signed CRT request to the AWSRequest

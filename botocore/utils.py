@@ -25,6 +25,9 @@ import socket
 import cgi
 import warnings
 
+from io import BytesIO
+import awscrt.http
+
 import dateutil.parser
 from dateutil.tz import tzutc
 
@@ -32,9 +35,9 @@ import botocore
 import botocore.awsrequest
 import botocore.httpsession
 from botocore.compat import (
-        json, quote, zip_longest, urlsplit, urlunsplit, OrderedDict,
-        six, urlparse, total_seconds, get_tzinfo_options, get_md5,
-        MD5_AVAILABLE
+    json, quote, zip_longest, urlsplit, urlunsplit, OrderedDict,
+    six, urlparse, total_seconds, get_tzinfo_options, get_md5,
+    MD5_AVAILABLE
 )
 from botocore.vendored.six.moves.urllib.request import getproxies, proxy_bypass
 from botocore.exceptions import (
@@ -96,6 +99,7 @@ IPV6_PAT = "(?:" + "|".join([x % _subs for x in _variations]) + ")"
 ZONE_ID_PAT = "(?:%25|%)(?:[" + UNRESERVED_PAT + "]|%[a-fA-F0-9]{2})+"
 IPV6_ADDRZ_PAT = r"\[" + IPV6_PAT + r"(?:" + ZONE_ID_PAT + r")?\]"
 IPV6_ADDRZ_RE = re.compile("^" + IPV6_ADDRZ_PAT + "$")
+
 
 def ensure_boolean(val):
     """Ensures a boolean value if a string or boolean is provided
@@ -250,7 +254,7 @@ class IMDSFetcher(object):
 
     def get_base_url(self):
         return self._base_url
-    
+
     def _select_base_url(self, base_url, config):
         if config is None:
             config = {}
@@ -259,8 +263,9 @@ class IMDSFetcher(object):
         custom_metadata_endpoint = config.get('ec2_metadata_service_endpoint')
 
         if requires_ipv6 and custom_metadata_endpoint:
-            logger.warn("Custom endpoint and IMDS_USE_IPV6 are both set. Using custom endpoint.")
-        
+            logger.warn(
+                "Custom endpoint and IMDS_USE_IPV6 are both set. Using custom endpoint.")
+
         chosen_base_url = None
 
         if base_url != METADATA_BASE_URL:
@@ -821,6 +826,7 @@ class ArgumentGenerator(object):
         print("Sample input for dynamodb.CreateTable: %s" % sample_input)
 
     """
+
     def __init__(self, use_member_names=False):
         self._use_member_names = use_member_names
 
@@ -895,6 +901,7 @@ def is_valid_ipv6_endpoint_url(endpoint_url):
     netloc = urlparse(endpoint_url).netloc
     return IPV6_ADDRZ_RE.match(netloc) is not None
 
+
 def is_valid_endpoint_url(endpoint_url):
     """Verify the endpoint_url is valid.
 
@@ -918,8 +925,10 @@ def is_valid_endpoint_url(endpoint_url):
         re.IGNORECASE)
     return allowed.match(hostname)
 
+
 def is_valid_uri(endpoint_url):
     return is_valid_endpoint_url(endpoint_url) or is_valid_ipv6_endpoint_url(endpoint_url)
+
 
 def validate_region_name(region_name):
     """Provided region_name must be a valid host label."""
@@ -1746,7 +1755,8 @@ class S3ControlEndpointSetter(object):
         return arn_service
 
     def _resolve_endpoint_from_arn_details(self, request, region_name):
-        new_netloc = self._resolve_netloc_from_arn_details(request, region_name)
+        new_netloc = self._resolve_netloc_from_arn_details(
+            request, region_name)
         self._update_request_netloc(request, new_netloc)
 
     def _update_request_netloc(self, request, new_netloc):
@@ -2334,3 +2344,37 @@ class SSOTokenLoader(object):
                 'invalid.'
             )
             raise SSOTokenLoadError(error_msg=error_msg)
+
+
+class CrtUtil(object):
+    '''
+    Utilities related to CRT.
+    '''
+    def crt_request_from_aws_request(aws_request):
+        url_parts = urlsplit(aws_request.url)
+        crt_path = url_parts.path if url_parts.path else '/'
+        if aws_request.params:
+            array = []
+            for (param, value) in aws_request.params.items():
+                value = str(value)
+                array.append('%s=%s' % (param, value))
+            crt_path = crt_path + '?' + '&'.join(array)
+        elif url_parts.query:
+            crt_path = '%s?%s' % (crt_path, url_parts.query)
+
+        crt_headers = awscrt.http.HttpHeaders(aws_request.headers.items())
+
+        # CRT requires body (if it exists) to be an I/O stream.
+        crt_body_stream = None
+        if aws_request.body:
+            if hasattr(aws_request.body, 'seek'):
+                crt_body_stream = aws_request.body
+            else:
+                crt_body_stream = BytesIO(aws_request.body)
+
+        crt_request = awscrt.http.HttpRequest(
+            method=aws_request.method,
+            path=crt_path,
+            headers=crt_headers,
+            body_stream=crt_body_stream)
+        return crt_request
