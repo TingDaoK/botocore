@@ -80,6 +80,7 @@ class Endpoint(object):
     :ivar host: The fully qualified endpoint hostname.
     :ivar session: The session object.
     """
+
     def __init__(self, host, endpoint_prefix, event_emitter,
                  response_parser_factory=None, http_session=None):
         self._endpoint_prefix = endpoint_prefix
@@ -151,7 +152,7 @@ class Endpoint(object):
             # We want to share num retries, not num attempts.
             total_retries = attempts - 1
             success_response[1]['ResponseMetadata']['RetryAttempts'] = \
-                    total_retries
+                total_retries
         if exception is not None:
             raise exception
         else:

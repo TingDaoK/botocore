@@ -32,6 +32,7 @@ import dateutil.parser
 from dateutil.tz import tzutc
 
 import botocore
+from botocore import awsrequest
 import botocore.awsrequest
 import botocore.httpsession
 from botocore.compat import (
@@ -2352,18 +2353,29 @@ class CrtUtil(object):
     '''
     def crt_request_from_aws_request(aws_request):
         url_parts = urlsplit(aws_request.url)
-        crt_path = url_parts.path if url_parts.path else '/'
-        if aws_request.params:
-            array = []
-            for (param, value) in aws_request.params.items():
-                value = str(value)
-                array.append('%s=%s' % (param, value))
-            crt_path = crt_path + '?' + '&'.join(array)
-        elif url_parts.query:
-            crt_path = '%s?%s' % (crt_path, url_parts.query)
+        if isinstance(aws_request, awsrequest.AWSPreparedRequest):
+            crt_path = url_parts.path
+            if url_parts.query:
+                crt_path = '%s?%s' % (crt_path, url_parts.query)
+            headers_list = []
+            for name, value in aws_request.headers.items():
+                if isinstance(value, str):
+                    headers_list.append((name, value))
+                else:
+                    headers_list.append((name, str(value, 'utf-8')))
 
-        crt_headers = awscrt.http.HttpHeaders(aws_request.headers.items())
-
+            crt_headers = awscrt.http.HttpHeaders(headers_list)
+        else:
+            crt_path = url_parts.path if url_parts.path else '/'
+            if aws_request.params:
+                array = []
+                for (param, value) in aws_request.params.items():
+                    value = str(value)
+                    array.append('%s=%s' % (param, value))
+                crt_path = crt_path + '?' + '&'.join(array)
+            elif url_parts.query:
+                crt_path = '%s?%s' % (crt_path, url_parts.query)
+            crt_headers = awscrt.http.HttpHeaders(aws_request.headers.items())
         # CRT requires body (if it exists) to be an I/O stream.
         crt_body_stream = None
         if aws_request.body:

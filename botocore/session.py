@@ -890,6 +890,7 @@ class Session(object):
 
 class ComponentLocator(object):
     """Service locator for session components."""
+
     def __init__(self):
         self._components = {}
         self._deferred = {}
@@ -976,6 +977,7 @@ class SubsetChainConfigFactory(object):
     out providers that are not in the methods tuple when creating a new config
     chain.
     """
+
     def __init__(self, session, methods, environ=None):
         self._factory = ConfigChainFactory(session, environ)
         self._supported_methods = methods

@@ -695,7 +695,7 @@ class CrtSigV4Auth(BaseSigner):
             signed_body_header_type=body_header,
             expiration_in_seconds=self._expiration_in_seconds,
         )
-        crt_request = CrtUtil.crt_request_from_aws_request(request)
+        crt_request = CrtUtil.crt_request_from_aws_request(aws_request=request)
         future = awscrt.auth.aws_sign_request(crt_request, signing_config)
         future.result()
         self._apply_signing_changes(request, crt_request)
