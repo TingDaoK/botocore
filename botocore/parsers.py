@@ -128,6 +128,8 @@ import os
 import re
 import struct
 
+from awscrt.cbor import AwsCborDecoder
+import datetime
 from botocore.compat import ETree, XMLParseError
 from botocore.eventstream import EventStream, NoInitialResponseError
 from botocore.utils import (
@@ -1204,7 +1206,7 @@ class BaseRestParser(ResponseParser):
             if header_name.lower().startswith(prefix):
                 # The key name inserted into the parsed hash
                 # strips off the prefix.
-                name = header_name[len(prefix) :]
+                name = header_name[len(prefix):]
                 parsed[name] = headers[header_name]
         return parsed
 
@@ -1474,6 +1476,68 @@ class RestXMLParser(BaseRestParser, BaseXMLResponseParser):
         return text
 
 
+class BaseCRTParser(ResponseParser):
+    def on_epoch_time(self, epoch_secs):
+        return datetime.datetime.fromtimestamp(epoch_secs)
+
+    def parse_data_item(self, stream):
+        parser = AwsCborDecoder(stream, self.on_epoch_time)
+        return parser.pop_next_data_item()
+
+
+class CrtRpcV2CBORParser(BaseRpcV2Parser, BaseCRTParser):
+    EVENT_STREAM_PARSER_CLS = EventStreamCBORParser
+
+    def _initial_body_parse(self, body_contents):
+        if body_contents == b'':
+            return body_contents
+        return self.parse_data_item(body_contents)
+
+    def _do_error_parse(self, response, shape):
+        body = self._initial_body_parse(response['body'])
+        error = {
+            "Error": {
+                "Message": body.get('message', body.get('Message', '')),
+                "Code": '',
+            },
+            "ResponseMetadata": {},
+        }
+        headers = response['headers']
+
+        code = body.get('__type')
+        if code is None:
+            response_code = response.get('status_code')
+            if response_code is not None:
+                code = str(response_code)
+        if code is not None:
+            if ':' in code:
+                code = code.split(':', 1)[0]
+            if '#' in code:
+                code = code.rsplit('#', 1)[1]
+            if 'x-amzn-query-error' in headers:
+                code = self._do_query_compatible_error_parse(
+                    code, headers, error
+                )
+            error['Error']['Code'] = code
+        if 'x-amzn-requestid' in headers:
+            error.setdefault('ResponseMetadata', {})['RequestId'] = headers[
+                'x-amzn-requestid'
+            ]
+        return error
+
+    def _handle_event_stream(self, response, shape, event_name):
+        event_stream_shape = shape.members[event_name]
+        event_stream = self._create_event_stream(response, event_stream_shape)
+        try:
+            event = event_stream.get_initial_response()
+        except NoInitialResponseError:
+            error_msg = 'First event was not of type initial-response'
+            raise ResponseParserError(error_msg)
+        parsed = self._initial_body_parse(event.payload)
+        parsed[event_name] = event_stream
+        return parsed
+
+
 PROTOCOL_PARSERS = {
     'ec2': EC2QueryParser,
     'query': QueryParser,
@@ -1481,4 +1545,7 @@ PROTOCOL_PARSERS = {
     'rest-json': RestJSONParser,
     'rest-xml': RestXMLParser,
     'smithy-rpc-v2-cbor': RpcV2CBORParser,
+    'crt-smithy-rpc-v2-cbor': CrtRpcV2CBORParser,
+    'crt-smithy-rpc-v2-cbor-botocore-shape': CrtRpcV2CBORParser,
+    'crt-smithy-rpc-v2-cbor-crt-shape': CrtRpcV2CBORParser,
 }

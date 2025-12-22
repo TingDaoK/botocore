@@ -58,6 +58,7 @@ from botocore.utils import (
     parse_to_aware_datetime,
     percent_encode,
 )
+from awscrt.cbor import AwsCborEncoder, ShapeBase
 
 # From the spec, the default timestamp format if not specified is iso8601.
 DEFAULT_TIMESTAMP_FORMAT = 'iso8601'
@@ -1267,6 +1268,338 @@ class RpcV2CBORSerializer(BaseRpcV2Serializer, CBORSerializer):
             serialized['headers']['Content-Type'] = header_val
 
 
+class CrtRpcV2CBORSerializer(BaseRpcV2Serializer):
+    TIMESTAMP_FORMAT = 'unixtimestamp'
+    FLOAT_AND_SIMPLE_MAJOR_TYPE = 7
+
+    def _get_initial_byte(self, major_type, additional_info):
+        # The highest order three bits are the major type, so we need to bitshift the
+        # major type by 5
+        major_type_bytes = major_type << 5
+        return (major_type_bytes | additional_info).to_bytes(1, "big")
+
+    def _is_special_number(self, value):
+        return any(
+            [
+                value == float('inf'),
+                value == float('-inf'),
+                math.isnan(value),
+            ]
+        )
+
+    def _get_bytes_for_special_numbers(self, value):
+        additional_info = 25
+        initial_byte = self._get_initial_byte(
+            self.FLOAT_AND_SIMPLE_MAJOR_TYPE, additional_info
+        )
+        if value == float('inf'):
+            return initial_byte + struct.pack(">H", 0x7C00)
+        elif value == float('-inf'):
+            return initial_byte + struct.pack(">H", 0xFC00)
+        elif math.isnan(value):
+            return initial_byte + struct.pack(">H", 0x7E00)
+
+    def serialize_to_request(self, parameters, operation_model):
+        return super().serialize_to_request(parameters, operation_model)
+
+    def _serialize_body_params(self, parameters, input_shape):
+        body = AwsCborEncoder()
+        self._serialize_data_item(body, parameters, input_shape)
+        return body.get_encoded_data()
+
+    def _serialize_headers(self, serialized, operation_model):
+        serialized['headers']['smithy-protocol'] = 'rpc-v2-cbor'
+
+        if operation_model.has_event_stream_output:
+            header_val = 'application/vnd.amazon.eventstream'
+        else:
+            header_val = 'application/cbor'
+
+        has_body = serialized['body'] != b''
+        has_content_type = has_header('Content-Type', serialized['headers'])
+
+        serialized['headers']['Accept'] = header_val
+        if not has_content_type and has_body:
+            serialized['headers']['Content-Type'] = header_val
+
+    def _serialize_data_item(self, serialized, value, shape, key=None):
+        method = getattr(self, f'_serialize_type_{shape.type_name}')
+        if method is None:
+            raise ValueError(f"Unrecognized C2J type: {shape.type_name}, unable to "
+                             f"serialize request")
+        method(serialized, value, shape, key)
+
+    def _serialize_type_integer(self, serialized, value, shape, key):
+        serialized.write_int(value)
+
+    def _serialize_type_long(self, serialized, value, shape, key):
+        self._serialize_type_integer(serialized, value, shape, key)
+
+    def _serialize_type_blob(self, serialized, value, shape, key):
+        if isinstance(value, str):
+            value = value.encode('utf-8')
+        serialized.write_bytes(value)
+
+    def _serialize_type_string(self, serialized, value, shape, key):
+        encoded = value.encode('utf-8')
+        serialized.write_text(value)
+
+    def _serialize_type_list(self, serialized, value, shape, key):
+        length = len(value)
+        serialized.write_array_start(length)
+        for item in value:
+            self._serialize_data_item(serialized, item, shape.member)
+
+    def _serialize_type_map(self, serialized, value, shape, key):
+        length = len(value)
+        serialized.write_map_start(length)
+        for key_item, item in value.items():
+            self._serialize_data_item(serialized, key_item, shape.key)
+            self._serialize_data_item(serialized, item, shape.value)
+
+    def _serialize_type_structure(self, serialized, value, shape, key):
+        if key is not None:
+            # For nested structures, we need to serialize the key first
+            self._serialize_data_item(serialized, key, shape.key_shape)
+
+        # Remove `None` values from the dictionary
+        value = {k: v for k, v in value.items() if v is not None}
+
+        map_length = len(value)
+        serialized.write_map_start(map_length)
+
+        members = shape.members
+        for member_key, member_value in value.items():
+            member_shape = members[member_key]
+            if 'name' in member_shape.serialization:
+                member_key = member_shape.serialization['name']
+            if member_value is not None:
+                self._serialize_type_string(serialized, member_key, None, None)
+                self._serialize_data_item(
+                    serialized, member_value, member_shape)
+
+    def _serialize_type_timestamp(self, serialized, value, shape, key):
+        timestamp = self._convert_timestamp_to_str(value)
+        serialized.write_epoch_time(timestamp)
+
+    def _serialize_type_float(self, serialized, value, shape, key):
+        serialized.write_float(value)
+
+    def _serialize_type_double(self, serialized, value, shape, key):
+        self._serialize_type_float(serialized, value, shape, key)
+
+    def _serialize_type_boolean(self, serialized, value, shape, key):
+        serialized.write_bool(value)
+
+
+class CrtRpcV2CBORSerializerShape(BaseRpcV2Serializer):
+    TIMESTAMP_FORMAT = 'unixtimestamp'
+
+    def serialize_to_request(self, parameters, operation_model):
+        return super().serialize_to_request(parameters, operation_model)
+
+    def _serialize_body_params(self, parameters, input_shape):
+
+        body = AwsCborEncoder()
+        self._serialize_data_item(body, parameters, input_shape)
+        return body.get_encoded_data()
+
+    def _serialize_headers(self, serialized, operation_model):
+        serialized['headers']['smithy-protocol'] = 'rpc-v2-cbor'
+
+        if operation_model.has_event_stream_output:
+            header_val = 'application/vnd.amazon.eventstream'
+        else:
+            header_val = 'application/cbor'
+
+        has_body = serialized['body'] != b''
+        has_content_type = has_header('Content-Type', serialized['headers'])
+
+        serialized['headers']['Accept'] = header_val
+        if not has_content_type and has_body:
+            serialized['headers']['Content-Type'] = header_val
+
+    def _serialize_data_item(self, serialized, value, shape, key=None):
+        # You could pass this shape down directly, as long as it's compatible with the ShapeBase from crt.
+        serialized.write_data_item_shaped(
+            value, shape, self._convert_timestamp_to_str)
+
+
+class BotocoreShapeAdapter(ShapeBase):
+    """
+    Adapter that wraps botocore Shape objects by extending ShapeBase.
+
+    This provides a lightweight wrapper around botocore Shape objects that
+    exposes only the properties needed by the CRT CBOR encoder. Handles
+    circular references naturally through caching.
+
+    This adapter allows aws-crt-python to work with botocore shapes without
+    requiring botocore to implement the ShapeInterface directly.
+    """
+
+    __slots__ = ('_shape', '_type_name', '_members',
+                 '_member', '_key', '_value')
+
+    def __init__(self, botocore_shape, parent_name=None, shape_cache=None):
+        """
+        Initialize adapter from botocore Shape.
+
+        Args:
+            botocore_shape: The botocore Shape object to wrap
+            parent_name: Optional parent shape name for tracking
+        """
+        self._shape = botocore_shape
+        self._type_name = botocore_shape.type_name
+        self._shape_cache = shape_cache or {}
+
+        # Lazily initialize these to None for caching
+        self._members = None
+        self._member = None
+        self._key = None
+        self._value = None
+
+    @property
+    def type_name(self) -> str:
+        """Return the shape type (structure, list, map, string, etc.)"""
+        return self._type_name
+
+    @property
+    def members(self):
+        """
+        For structure types, return dict of member name -> ShapeInterface.
+        Cached to avoid repeated conversions.
+        """
+        if self._type_name != "structure":
+            raise AttributeError(
+                f"Shape type {self._type_name} has no members")
+
+        if self._members is None:
+            self._members = {}
+            for name, member_shape in self._shape.members.items():
+                self._members[name] = BotocoreShapeAdapter(
+                    member_shape, parent_name=name)
+
+        return self._members
+
+    @property
+    def member(self) -> ShapeBase:
+        """
+        For list types, return the ShapeInterface of list elements.
+        Cached to avoid repeated conversions.
+        """
+        if self._type_name != "list":
+            raise AttributeError(f"Shape type {self._type_name} has no member")
+
+        if self._member is None:
+            self._member = BotocoreShapeAdapter(self._shape.member)
+
+        return self._member
+
+    @property
+    def key(self) -> ShapeBase:
+        """
+        For map types, return the ShapeInterface of map keys.
+        Cached to avoid repeated conversions.
+        """
+        if self._type_name != "map":
+            raise AttributeError(f"Shape type {self._type_name} has no key")
+
+        if self._key is None:
+            self._key = BotocoreShapeAdapter(self._shape.key)
+
+        return self._key
+
+    @property
+    def value(self) -> ShapeBase:
+        """
+        For map types, return the ShapeInterface of map values.
+        Cached to avoid repeated conversions.
+        """
+        if self._type_name != "map":
+            raise AttributeError(f"Shape type {self._type_name} has no value")
+
+        if self._value is None:
+            self._value = BotocoreShapeAdapter(self._shape.value)
+
+        return self._value
+
+    def get_serialization_name(self, member_name: str) -> str:
+        """
+        Get the serialization name for a member (for structure types).
+        Returns the custom name if specified, otherwise the member name.
+
+        Args:
+            member_name: The Python member name
+
+        Returns:
+            str: The name to use in CBOR encoding
+        """
+        if self._type_name != "structure":
+            raise AttributeError(
+                f"Shape type {self._type_name} has no serialization_name")
+
+        member_shape = self._shape.members.get(member_name)
+        if member_shape is None:
+            raise ValueError(f"Unknown member: {member_name}")
+
+        return member_shape.serialization.get('name', member_name)
+
+    def __repr__(self):
+        return f"BotocoreShapeAdapter(type={self._type_name})"
+
+
+class CrtRpcV2CBORSerializerShapeFirst(BaseRpcV2Serializer):
+    TIMESTAMP_FORMAT = 'unixtimestamp'
+
+    def __init__(self):
+        super().__init__()
+        self._shape_cache = {}  # Cache CRTShape wrappers for reuse
+
+    def serialize_to_request(self, parameters, operation_model):
+        return super().serialize_to_request(parameters, operation_model)
+
+    def _serialize_body_params(self, parameters, input_shape):
+        body = AwsCborEncoder()
+        self._serialize_data_item(body, parameters, input_shape)
+        return body.get_encoded_data()
+
+    def _serialize_headers(self, serialized, operation_model):
+        serialized['headers']['smithy-protocol'] = 'rpc-v2-cbor'
+
+        if operation_model.has_event_stream_output:
+            header_val = 'application/vnd.amazon.eventstream'
+        else:
+            header_val = 'application/cbor'
+
+        has_body = serialized['body'] != b''
+        has_content_type = has_header('Content-Type', serialized['headers'])
+
+        serialized['headers']['Accept'] = header_val
+        if not has_content_type and has_body:
+            serialized['headers']['Content-Type'] = header_val
+
+    def _serialize_data_item(self, serialized, value, shape, key=None):
+        """Serialize data item using CRTShape wrapper."""
+        # Get cached CRTShape wrapper (wraps once, reuse many times!)
+        crt_shape = self._get_cached_shape(shape)
+
+        # Pass CRTShape directly to C - no dict conversion needed!
+        serialized.write_data_item_shaped(
+            value, crt_shape, self._convert_timestamp_to_str)
+
+    def _get_cached_shape(self, shape):
+        """Get cached BotocoreShapeAdapter wrapper or create and cache if needed."""
+        # Use shape name as cache key (more reliable than id())
+        cache_key = shape.name
+
+        if cache_key not in self._shape_cache:
+            # Shape not cached yet - wrap and store it
+            self._shape_cache[cache_key] = BotocoreShapeAdapter(
+                shape, shape_cache=self._shape_cache)
+
+        return self._shape_cache[cache_key]
+
+
 SERIALIZERS = {
     'ec2': EC2Serializer,
     'query': QuerySerializer,
@@ -1274,4 +1607,7 @@ SERIALIZERS = {
     'rest-json': RestJSONSerializer,
     'rest-xml': RestXMLSerializer,
     'smithy-rpc-v2-cbor': RpcV2CBORSerializer,
+    'crt-smithy-rpc-v2-cbor': CrtRpcV2CBORSerializer,
+    'crt-smithy-rpc-v2-cbor-botocore-shape': CrtRpcV2CBORSerializerShape,
+    'crt-smithy-rpc-v2-cbor-crt-shape': CrtRpcV2CBORSerializerShapeFirst,
 }
